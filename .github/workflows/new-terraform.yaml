@@ -58,7 +58,16 @@ jobs:
     needs: Setting-Up-Terraform
     runs-on: ubuntu-latest
     steps:
-      - name: Initialize Terraform
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.3
+        
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
+      - name: Terraform Init
         working-directory: eks
         run: terraform init
 
@@ -69,6 +78,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.3
+        
+      - name: Terraform Init
+        working-directory: eks
+        run: terraform init
       
       - name: Format Terraform
         working-directory: eks

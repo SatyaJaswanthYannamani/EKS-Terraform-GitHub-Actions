@@ -109,3 +109,7 @@ resource "aws_eks_node_group" "spot-node" {
 
   depends_on = [aws_eks_cluster.eks]
 }
+
+output "eks_cluster_name" {
+  value = aws_eks_cluster.eks[0].name
+}

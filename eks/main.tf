@@ -42,3 +42,9 @@ module "eks" {
 
   addons = var.addons
 }
+
+# Output block for the EKS cluster name
+output "eks_cluster_name" {
+  value       = module.eks.cluster-name
+  description = "The name of the EKS cluster"
+}

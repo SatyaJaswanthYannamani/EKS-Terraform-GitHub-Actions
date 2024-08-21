@@ -1,0 +1,186 @@
+name: 'Terraform with ArgoCD, ELK, Prometheus, and Grafana'
+
+on:
+  workflow_dispatch:
+    inputs:
+      tfvars_file:
+        description: 'Path to the .tfvars file'
+        required: true
+        default: 'dev.tfvars'
+      action:
+        type: choice
+        description: 'Plan, Apply, or Destroy'
+        options:
+        - plan
+        - apply
+        - destroy
+        required: true
+        default: 'apply'
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Step 1: Checkout the Repository
+  CheckOut-Repo:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+  # Step 2: Setup Terraform
+  Setting-Up-Terraform:
+    needs: CheckOut-Repo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.3
+
+  # Step 3: Initialize Terraform
+  Terraform-Initializing:
+    needs: Setting-Up-Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - name: Initialize Terraform
+        working-directory: eks
+        run: terraform init
+
+  # Step 4: Format and Validate Terraform
+  Terraform-Formatting-Validating:
+    needs: Terraform-Initializing
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Format Terraform
+        working-directory: eks
+        run: terraform fmt
+
+      - name: Validate Terraform
+        working-directory: eks
+        run: terraform validate
+
+  # Step 5: Apply or Destroy Infrastructure
+  Terraform-Action:
+    needs: Terraform-Formatting-Validating
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.3
+
+      - name: Initialize Terraform
+        working-directory: eks
+        run: terraform init
+
+      - name: Plan Terraform
+        if: ${{ github.event.inputs.action == 'plan' }}
+        working-directory: eks
+        run: |
+          terraform plan -var-file=${{ github.event.inputs.tfvars_file }} -input=false
+
+      - name: Apply Terraform
+        if: ${{ github.event.inputs.action == 'apply' }}
+        working-directory: eks
+        run: |
+          terraform apply -auto-approve -var-file=${{ github.event.inputs.tfvars_file }} -input=false
+          
+      - name: Capture EKS Cluster Name
+        if: ${{ github.event.inputs.action == 'apply' }}
+        id: get-cluster-name
+        working-directory: eks
+        run: echo "EKS_CLUSTER_NAME=$(terraform output -raw eks_cluster_name)" >> $GITHUB_ENV
+
+  # Step 6: Install ArgoCD
+  Install-ArgoCD:
+    needs: Terraform-Action
+    if: ${{ github.event.inputs.action == 'apply' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure kubectl to Connect to EKS
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Install ArgoCD
+        run: |
+          kubectl create namespace argocd
+          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+      - name: Expose ArgoCD Server
+        run: |
+          kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
+
+  # Step 7: Install ELK Stack
+  Install-ELK:
+    needs: Install-ArgoCD
+    if: ${{ github.event.inputs.action == 'apply' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure kubectl to Connect to EKS
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Install ELK Stack
+        run: |
+          helm repo add elastic https://helm.elastic.co
+          helm install elasticsearch elastic/elasticsearch --namespace monitoring
+          helm install kibana elastic/kibana --namespace monitoring
+          helm install logstash elastic/logstash --namespace monitoring
+
+      - name: Expose Kibana (ELK Stack)
+        run: |
+          kubectl patch svc kibana -n monitoring -p '{"spec": {"type": "LoadBalancer"}}'
+
+  # Step 8: Install Prometheus and Grafana
+  Install-Prometheus-Grafana:
+    needs: Install-ELK
+    if: ${{ github.event.inputs.action == 'apply' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure kubectl to Connect to EKS
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Install Prometheus and Grafana
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm repo update
+          
+          # Install Prometheus
+          helm install prometheus prometheus-community/prometheus --namespace monitoring --create-namespace
+          
+          # Install Grafana
+          helm install grafana grafana/grafana --namespace monitoring
+
+      - name: Expose Grafana
+        run: |
+          kubectl patch svc grafana -n monitoring -p '{"spec": {"type": "LoadBalancer"}}'
+
+  # Step 9: Install HashiCorp Vault
+  Install-Vault:
+    needs: Install-Prometheus-Grafana
+    if: ${{ github.event.inputs.action == 'apply' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure kubectl to Connect to EKS
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+          
+      - name: Install HashiCorp Vault
+        run: |
+          helm repo add hashicorp https://helm.releases.hashicorp.com
+          helm install vault hashicorp/vault --namespace vault --create-namespace
